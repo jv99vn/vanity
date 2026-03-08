@@ -11,8 +11,8 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use args::Args;
 use colored::Colorize;
-use output::{PerformanceTable, ResultFile};
-use vanity_core::Pattern;
+use output::ResultFile;
+use vanity_core::{Pattern, crypto::generate_keypair};
 
 fn main() -> Result<()> {
     let args = Args::parse_args();
@@ -22,7 +22,8 @@ fn main() -> Result<()> {
     let r = running.clone();
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
-        println!("\n\n{}", "🛑 Stopping search...".yellow());
+        println!();
+        println!("{}", "🛑 Stopping search...".yellow());
     }).expect("Error setting Ctrl-C handler");
 
     // Validate and create pattern
@@ -37,267 +38,151 @@ fn main() -> Result<()> {
     let mut result_file = ResultFile::new(args.prefix.as_deref(), args.suffix.as_deref())
         .context("Failed to create output file")?;
 
+    // Print header once
     println!();
     println!("{}", "╔══════════════════════════════════════════════════════════════════════════════════╗".bright_cyan());
     println!("{}", "║             🚀 ETHEREUM VANITY ADDRESS GENERATOR - LIVE SEARCH                  ║".bright_cyan());
     println!("{}", "╚══════════════════════════════════════════════════════════════════════════════════╝".bright_cyan());
     println!();
     println!("  {} {}", "🎯 Pattern:".bold(), pattern_str.green().bold());
-    println!("  {} {:.2e} (1 in {:.0})", "📊 Difficulty:", difficulty, difficulty);
+    println!("  {} 1 in {:.0} addresses", "📊 Difficulty:", difficulty);
     println!("  {} {} addresses", "🎯 Target:".bold(), target_count.to_string().bright_green());
     println!("  {} {}", "📁 Output:", result_file.path().display().to_string().bright_blue());
     println!();
-    println!("{}", "Starting search... (Press Ctrl+C to stop)".dimmed());
-    println!();
+    println!("{}", "┌──────────────────────────────────────────────────────────────────────────────────┐".cyan());
+    println!("{}", "│                              📝 LIVE SEARCH LOG                                  │".cyan());
+    println!("{}", "├──────────────────────────────────────────────────────────────────────────────────┤".cyan());
+    io::stdout().flush().ok();
 
     // Run search
-    let results = match args.backend.as_str() {
-        "cpu" => run_cpu_search(
-            &args,
-            &pattern,
-            &pattern_str,
-            difficulty,
-            &mut result_file,
-            running,
-        )?,
-        #[cfg(feature = "cuda")]
-        "cuda" => run_cuda_search(
-            &args,
-            &pattern,
-            &pattern_str,
-            difficulty,
-            &mut result_file,
-            running,
-        )?,
-        #[cfg(not(feature = "cuda"))]
-        "cuda" => {
-            eprintln!("CUDA support not compiled in. Use --backend cpu or rebuild with --features cuda");
-            std::process::exit(1);
-        }
-        #[cfg(feature = "opencl")]
-        "opencl" => run_opencl_search(
-            &args,
-            &pattern,
-            &pattern_str,
-            difficulty,
-            &mut result_file,
-            running,
-        )?,
-        #[cfg(not(feature = "opencl"))]
-        "opencl" => {
-            eprintln!("OpenCL support not compiled in. Use --backend cpu or rebuild with --features opencl");
-            std::process::exit(1);
-        }
-        _ => unreachable!("Invalid backend (should be caught by clap)"),
-    };
+    let (results, total_iterations, elapsed) = run_cpu_search(
+        &pattern,
+        &mut result_file,
+        running,
+        target_count,
+    )?;
 
     // Print final summary
     if !results.is_empty() {
+        println!("{}", "├──────────────────────────────────────────────────────────────────────────────────┤".cyan());
+        println!(
+            "│  {} Search complete! Found {} / {} addresses in {}                ",
+            "✅".bright_green(),
+            results.len().to_string().bright_green(),
+            target_count,
+            output::format_duration(elapsed)
+        );
+        println!("{}", "└──────────────────────────────────────────────────────────────────────────────────┘".cyan());
         println!();
-        println!("{}", "╔══════════════════════════════════════════════════════════════════════════════════╗".bright_green());
-        println!("{}", "║                          🎉 SEARCH COMPLETE - RESULTS 🎉                         ║".bright_green());
-        println!("{}", "╚══════════════════════════════════════════════════════════════════════════════════╝".bright_green());
-
-        for (i, result) in results.iter().enumerate() {
-            result.print(i, results.len());
-        }
-
-        println!("  {} Results saved to: {}", "📁".blue(), result_file.path().display().to_string().bright_blue());
+        println!("  {} Total addresses checked: {}", "📊", output::format_number(total_iterations));
+        println!("  {} Average speed: {}", "⚡", output::format_speed(total_iterations as f64 / elapsed.max(0.001)));
+        println!("  {} Results saved to: {}", "📁", result_file.path().display().to_string().bright_blue());
         println!();
     } else {
+        println!("{}", "└──────────────────────────────────────────────────────────────────────────────────┘".cyan());
         println!();
-        println!("{}", "No matches found (search was interrupted)".yellow());
+        println!("{}", "  No matches found (search was interrupted)".yellow());
+        println!();
     }
 
     Ok(())
 }
 
 fn run_cpu_search(
-    args: &Args,
     pattern: &Pattern,
-    pattern_str: &str,
-    difficulty: f64,
     result_file: &mut ResultFile,
     running: Arc<AtomicBool>,
-) -> Result<Vec<output::SearchResult>> {
-    use vanity_core::crypto::generate_keypair;
-
-    let mut perf_table = PerformanceTable::new();
+    target_count: usize,
+) -> Result<(Vec<output::SearchResult>, u64, f64)> {
     let start = Instant::now();
-
     let mut results = Vec::new();
     let mut iterations = 0u64;
-    let target_count = args.count;
+    let mut last_log_iterations = 0u64;
+    let log_interval = 100_000u64; // Log progress every 100k iterations
 
-    // Main search loop - runs until we have enough matches or user stops
-    while results.len() < target_count && running.load(Ordering::SeqCst) {
+    // Main search loop - ONLY stops when:
+    // 1. Found enough addresses (target_count)
+    // 2. User presses Ctrl+C
+    loop {
+        // Check if we have enough results FIRST - STOP IMMEDIATELY
+        if results.len() >= target_count {
+            break;
+        }
+
+        // Check for Ctrl+C
+        if !running.load(Ordering::SeqCst) {
+            break;
+        }
+
+        // Generate one keypair
         let keypair = generate_keypair();
         iterations += 1;
 
-        if pattern.matches(&keypair.address.to_hex()) {
+        // Get address hex without 0x prefix for matching
+        let addr_hex = keypair.address.to_hex();
+
+        // Check if it matches the pattern
+        if pattern.matches(&addr_hex) {
             let result = output::SearchResult::new(keypair, iterations);
-            results.push(result);
+            results.push(result.clone());
 
-            // Save to file immediately
-            if let Err(e) = result_file.save_result(&results.last().unwrap()) {
+            // Save to file IMMEDIATELY
+            if let Err(e) = result_file.save_result(&result) {
                 eprintln!("{} Failed to save result: {}", "❌".red(), e);
             }
 
-            // Print match notification immediately (real-time!)
-            perf_table.print_match_found(
-                &results.last().unwrap(),
-                results.len(),
+            // Print match notification IMMEDIATELY in real-time
+            let elapsed = start.elapsed().as_secs_f64();
+            let rate = iterations as f64 / elapsed.max(0.001);
+            let timestamp = output::chrono_timestamp();
+
+            println!(
+                "│  {} [{}] {} MATCH #{}/{} │ Iteration: {} │ Speed: {}",
+                "🎯".bright_green(),
+                timestamp.dimmed(),
+                "FOUND".bright_green().bold(),
+                results.len().to_string().bright_green(),
                 target_count,
+                output::format_number(iterations).bright_white(),
+                output::format_speed(rate).yellow()
             );
-
-            // Flush stdout to ensure immediate output
+            println!(
+                "│       📍 Address: {}",
+                result.keypair.address_hex().bright_white()
+            );
+            println!(
+                "│       🔑 Private: {}",
+                result.keypair.private_key_hex().dimmed()
+            );
+            println!("│");
             io::stdout().flush().ok();
-        }
 
-        // Update display periodically (every 100ms)
-        if perf_table.should_update() {
-            perf_table.render(iterations, results.len(), target_count, pattern_str, difficulty);
-        }
-    }
-
-    // Final display
-    perf_table.render(iterations, results.len(), target_count, pattern_str, difficulty);
-
-    // Print final statistics
-    let stats = output::Stats::new(
-        iterations,
-        start.elapsed().as_secs_f64(),
-        results.len(),
-        target_count,
-        &result_file.path().display().to_string(),
-    );
-    stats.print();
-
-    Ok(results)
-}
-
-#[cfg(feature = "cuda")]
-fn run_cuda_search(
-    args: &Args,
-    pattern: &Pattern,
-    pattern_str: &str,
-    difficulty: f64,
-    result_file: &mut ResultFile,
-    running: Arc<AtomicBool>,
-) -> Result<Vec<output::SearchResult>> {
-    use vanity_cuda::CudaSearcher;
-
-    let mut searcher = CudaSearcher::new(args.device)
-        .context("Failed to initialize CUDA")?;
-
-    let device_name = searcher.device_name();
-    let mut perf_table = PerformanceTable::new();
-    let start = Instant::now();
-
-    let mut results = Vec::new();
-    let mut total_iterations = 0u64;
-    let batch_size = 1_000_000u64; // Smaller batches for more frequent updates
-    let target_count = args.count;
-
-    while results.len() < target_count && running.load(Ordering::SeqCst) {
-        let batch_results = searcher.search_batch(pattern, batch_size)?;
-
-        for keypair in batch_results {
-            let result = output::SearchResult::new(keypair, total_iterations + results.len() as u64 + 1);
-            results.push(result);
-
-            // Save to file immediately
-            if let Err(e) = result_file.save_result(&results.last().unwrap()) {
-                eprintln!("{} Failed to save result: {}", "❌".red(), e);
+            // Check if we have enough - STOP IMMEDIATELY, no more iterations
+            if results.len() >= target_count {
+                break;
             }
+        }
 
-            // Print match notification immediately
-            perf_table.print_match_found(
-                &results.last().unwrap(),
-                results.len(),
-                target_count,
+        // Log progress periodically (not clearing screen)
+        if iterations - last_log_iterations >= log_interval {
+            last_log_iterations = iterations;
+            let elapsed = start.elapsed().as_secs_f64();
+            let rate = iterations as f64 / elapsed.max(0.001);
+            let timestamp = output::chrono_timestamp();
+
+            println!(
+                "│  {} [{}] Checked {} addresses │ Speed: {} │ Found: {}/{}",
+                "⏳".yellow(),
+                timestamp.dimmed(),
+                output::format_number(iterations).white(),
+                output::format_speed(rate).cyan(),
+                results.len().to_string().bright_green(),
+                target_count
             );
             io::stdout().flush().ok();
         }
-
-        total_iterations += batch_size;
-
-        // Update display
-        perf_table.render(total_iterations, results.len(), target_count, pattern_str, difficulty);
     }
 
-    // Print final statistics
-    let stats = output::Stats::new(
-        total_iterations,
-        start.elapsed().as_secs_f64(),
-        results.len(),
-        target_count,
-        &result_file.path().display().to_string(),
-    );
-    stats.print();
-
-    Ok(results)
-}
-
-#[cfg(feature = "opencl")]
-fn run_opencl_search(
-    args: &Args,
-    pattern: &Pattern,
-    pattern_str: &str,
-    difficulty: f64,
-    result_file: &mut ResultFile,
-    running: Arc<AtomicBool>,
-) -> Result<Vec<output::SearchResult>> {
-    use vanity_opencl::OpenClSearcher;
-
-    let mut searcher = OpenClSearcher::new(args.device)
-        .context("Failed to initialize OpenCL")?;
-
-    let device_name = searcher.device_name();
-    let mut perf_table = PerformanceTable::new();
-    let start = Instant::now();
-
-    let mut results = Vec::new();
-    let mut total_iterations = 0u64;
-    let batch_size = 1_000_000u64;
-    let target_count = args.count;
-
-    while results.len() < target_count && running.load(Ordering::SeqCst) {
-        let batch_results = searcher.search_batch(pattern, batch_size)?;
-
-        for keypair in batch_results {
-            let result = output::SearchResult::new(keypair, total_iterations + results.len() as u64 + 1);
-            results.push(result);
-
-            // Save to file immediately
-            if let Err(e) = result_file.save_result(&results.last().unwrap()) {
-                eprintln!("{} Failed to save result: {}", "❌".red(), e);
-            }
-
-            // Print match notification immediately
-            perf_table.print_match_found(
-                &results.last().unwrap(),
-                results.len(),
-                target_count,
-            );
-            io::stdout().flush().ok();
-        }
-
-        total_iterations += batch_size;
-
-        // Update display
-        perf_table.render(total_iterations, results.len(), target_count, pattern_str, difficulty);
-    }
-
-    // Print final statistics
-    let stats = output::Stats::new(
-        total_iterations,
-        start.elapsed().as_secs_f64(),
-        results.len(),
-        target_count,
-        &result_file.path().display().to_string(),
-    );
-    stats.print();
-
-    Ok(results)
+    let elapsed = start.elapsed().as_secs_f64();
+    Ok((results, iterations, elapsed))
 }
