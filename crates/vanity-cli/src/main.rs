@@ -68,67 +68,26 @@ fn main() -> Result<()> {
     let results = match args.backend.as_str() {
         "cpu" => run_cpu_search(
             &pattern,
-            &pattern_str,
-            difficulty,
             &mut result_file,
             running,
             target_count,
         )?,
-        "metal" => run_metal_search(
-            &pattern,
-            &pattern_str,
-            difficulty,
-            &mut result_file,
-            running,
-            target_count,
-            args.device,
-        )?,
-        "cuda" => {
-            #[cfg(feature = "cuda")]
+        "metal" => {
+            #[cfg(target_os = "macos")]
             {
-                run_cuda_search(
+                run_metal_search(
                     &pattern,
-                    &pattern_str,
-                    difficulty,
                     &mut result_file,
                     running,
                     target_count,
                     args.device,
                 )?
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(target_os = "macos"))]
             {
-                println!("│  {} CUDA not available, falling back to CPU", "⚠️".yellow());
+                println!("│  {} Metal only available on macOS, falling back to CPU", "⚠️".yellow());
                 run_cpu_search(
                     &pattern,
-                    &pattern_str,
-                    difficulty,
-                    &mut result_file,
-                    running,
-                    target_count,
-                )?
-            }
-        }
-        "opencl" => {
-            #[cfg(feature = "opencl")]
-            {
-                run_opencl_search(
-                    &pattern,
-                    &pattern_str,
-                    difficulty,
-                    &mut result_file,
-                    running,
-                    target_count,
-                    args.device,
-                )?
-            }
-            #[cfg(not(feature = "opencl"))]
-            {
-                println!("│  {} OpenCL not available, falling back to CPU", "⚠️".yellow());
-                run_cpu_search(
-                    &pattern,
-                    &pattern_str,
-                    difficulty,
                     &mut result_file,
                     running,
                     target_count,
@@ -139,8 +98,6 @@ fn main() -> Result<()> {
             println!("│  {} Unknown backend, falling back to CPU", "⚠️".yellow());
             run_cpu_search(
                 &pattern,
-                &pattern_str,
-                difficulty,
                 &mut result_file,
                 running,
                 target_count,
@@ -150,21 +107,17 @@ fn main() -> Result<()> {
 
     // Print final summary
     if !results.is_empty() {
-        let elapsed = results.iter().last().map(|r| r.iteration).unwrap_or(0);
+        let total_iterations = results.iter().last().map(|r| r.iteration).unwrap_or(0);
         println!("{}", "├──────────────────────────────────────────────────────────────────────────────────┤".cyan());
         println!(
-            "│  {} Search complete! Found {} / {} addresses in {}                ",
+            "│  {} Search complete! Found {} / {} addresses                                ",
             "✅".bright_green(),
             results.len().to_string().bright_green(),
-            target_count,
-            output::format_duration(results.iter().last().map(|r| {
-                let start = Instant::now();
-                0.0 // placeholder
-            }).unwrap_or(0.0))
+            target_count
         );
         println!("{}", "└──────────────────────────────────────────────────────────────────────────────────┘".cyan());
         println!();
-        println!("  {} Total addresses checked: {}", "📊", output::format_number(elapsed));
+        println!("  {} Total addresses checked: {}", "📊", output::format_number(total_iterations));
         println!("  {} Results saved to: {}", "📁", result_file.path().display().to_string().bright_blue());
         println!();
     } else {
@@ -179,8 +132,6 @@ fn main() -> Result<()> {
 
 fn run_cpu_search(
     pattern: &Pattern,
-    _pattern_str: &str,
-    _difficulty: f64,
     result_file: &mut ResultFile,
     running: Arc<AtomicBool>,
     target_count: usize,
@@ -257,41 +208,53 @@ fn run_cpu_search(
     Ok(results)
 }
 
+#[cfg(target_os = "macos")]
 fn run_metal_search(
     pattern: &Pattern,
-    pattern_str: &str,
-    difficulty: f64,
     result_file: &mut ResultFile,
     running: Arc<AtomicBool>,
     target_count: usize,
-    _device: usize,
+    device_id: usize,
 ) -> Result<Vec<output::SearchResult>> {
-    // Metal uses CPU fallback until full GPU implementation
-    // Metal shaders provide ~10-50x speedup on M4 Max
+    use vanity_metal::MetalSearcher;
 
-    let start = Instant::now();
-    let mut results = Vec::new();
-    let mut iterations = 0u64;
-    let mut last_log_iterations = 0u64;
-    let log_interval = 100_000u64;
+    // Initialize Metal
+    let searcher = MetalSearcher::new(device_id);
+    let device_name = match &searcher {
+        Ok(s) => s.device_name(),
+        Err(_) => "CPU Fallback".to_string(),
+    };
 
     println!(
-        "│  {} Using Metal GPU acceleration (Apple Silicon)",
-        "🚀".bright_magenta()
+        "│  {} Using Metal GPU: {}",
+        "🚀".bright_magenta(),
+        device_name.bright_white()
     );
     println!("│");
     io::stdout().flush().ok();
 
-    loop {
-        if results.len() >= target_count || !running.load(Ordering::SeqCst) {
-            break;
+    // If Metal failed to initialize, fall back to CPU
+    let mut searcher = match searcher {
+        Ok(s) => s,
+        Err(e) => {
+            println!("│  {} Metal init failed: {}, using CPU", "⚠️".yellow(), e);
+            return run_cpu_search(pattern, result_file, running, target_count);
         }
+    };
 
-        let keypair = generate_keypair();
-        iterations += 1;
+    let start = Instant::now();
+    let mut results = Vec::new();
+    let mut total_iterations = 0u64;
+    let batch_size = 1_000_000u64; // 1M per batch
+    let log_interval = 10_000_000u64;
 
-        if pattern.matches(&keypair.address.to_hex()) {
-            let result = output::SearchResult::new(keypair, iterations);
+    while results.len() < target_count && running.load(Ordering::SeqCst) {
+        // Search batch on GPU
+        let batch_results = searcher.search_batch(pattern, batch_size)?;
+
+        for gpu_result in batch_results {
+            let keypair = gpu_result.to_keypair();
+            let result = output::SearchResult::new(keypair, total_iterations + results.len() as u64 + 1);
             results.push(result.clone());
 
             if let Err(e) = result_file.save_result(&result) {
@@ -299,7 +262,7 @@ fn run_metal_search(
             }
 
             let elapsed = start.elapsed().as_secs_f64();
-            let rate = iterations as f64 / elapsed.max(0.001);
+            let rate = total_iterations as f64 / elapsed.max(0.001);
 
             println!(
                 "│  {} [{}] {} MATCH #{}/{} │ Iteration: {} │ Speed: {}",
@@ -308,7 +271,7 @@ fn run_metal_search(
                 "FOUND".bright_green().bold(),
                 results.len().to_string().bright_green(),
                 target_count,
-                output::format_number(iterations).bright_white(),
+                output::format_number(result.iteration).bright_white(),
                 output::format_speed(rate).yellow()
             );
             println!(
@@ -327,16 +290,17 @@ fn run_metal_search(
             }
         }
 
-        if iterations - last_log_iterations >= log_interval {
-            last_log_iterations = iterations;
+        total_iterations += batch_size;
+
+        if total_iterations % log_interval == 0 {
             let elapsed = start.elapsed().as_secs_f64();
-            let rate = iterations as f64 / elapsed.max(0.001);
+            let rate = total_iterations as f64 / elapsed.max(0.001);
 
             println!(
                 "│  {} [{}] Checked {} addresses │ Speed: {} │ Found: {}/{}",
                 "⏳".yellow(),
                 output::chrono_timestamp().dimmed(),
-                output::format_number(iterations).white(),
+                output::format_number(total_iterations).white(),
                 output::format_speed(rate).cyan(),
                 results.len().to_string().bright_green(),
                 target_count
@@ -346,32 +310,4 @@ fn run_metal_search(
     }
 
     Ok(results)
-}
-
-#[cfg(feature = "cuda")]
-fn run_cuda_search(
-    pattern: &Pattern,
-    pattern_str: &str,
-    difficulty: f64,
-    result_file: &mut ResultFile,
-    running: Arc<AtomicBool>,
-    target_count: usize,
-    device: usize,
-) -> Result<Vec<output::SearchResult>> {
-    // CUDA implementation - falls back to CPU
-    run_cpu_search(pattern, pattern_str, difficulty, result_file, running, target_count)
-}
-
-#[cfg(feature = "opencl")]
-fn run_opencl_search(
-    pattern: &Pattern,
-    pattern_str: &str,
-    difficulty: f64,
-    result_file: &mut ResultFile,
-    running: Arc<AtomicBool>,
-    target_count: usize,
-    device: usize,
-) -> Result<Vec<output::SearchResult>> {
-    // OpenCL implementation - falls back to CPU
-    run_cpu_search(pattern, pattern_str, difficulty, result_file, running, target_count)
 }
