@@ -1,7 +1,9 @@
 //! Output formatting and display utilities.
 
 use colored::Colorize;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::time::Duration;
 use vanity_core::crypto::KeyPair;
 
@@ -17,65 +19,92 @@ impl SearchResult {
     }
 
     /// Print the result to stdout
-    pub fn print(&self, index: usize) {
+    pub fn print(&self, index: usize, total: usize) {
         println!();
-        println!("{}", format!("═{}", "═".repeat(70)).dimmed());
+        println!("{}", "┌─────────────────────────────────────────────────────────────────────────────┐".bright_green());
         println!(
-            "{} {}",
-            format!("[{}/]", index + 1).green().bold(),
-            "Address Found!".green().bold()
+            "{}",
+            format!(
+                "│  🎯 MATCH {}/{} - Found at iteration {}",
+                index + 1,
+                total,
+                format_number(self.iteration)
+            )
+            .bright_green()
+            .bold()
         );
-        println!("{}", format!("═{}", "═".repeat(70)).dimmed());
+        println!("{}", "├─────────────────────────────────────────────────────────────────────────────┤".bright_green());
 
         println!(
-            "  {} {}",
+            "│  {} {}",
             "Address:".cyan().bold(),
             self.keypair.address_hex().bright_white()
         );
         println!(
-            "  {} {}",
-            "Private Key:".yellow().bold(),
+            "│  {} {}",
+            "Private:".yellow().bold(),
             self.keypair.private_key_hex()
         );
-        println!(
-            "  {} {}",
-            "Found at:".dimmed(),
-            format!("iteration {}", format_number(self.iteration)).dimmed()
-        );
-        println!("{}", format!("═{}", "═".repeat(70)).dimmed());
+        println!("{}", "└─────────────────────────────────────────────────────────────────────────────┘".bright_green());
         println!();
     }
 
-    /// Print in a simple format for scripting
-    pub fn print_simple(&self) {
-        println!("address={}", self.keypair.address_hex());
-        println!("private_key={}", self.keypair.private_key_hex());
+    /// Convert to file format string
+    pub fn to_file_format(&self) -> String {
+        format!(
+            "Address: {}\nPrivate Key: {}\nIteration: {}\n---\n",
+            self.keypair.address_hex(),
+            self.keypair.private_key_hex(),
+            self.iteration
+        )
     }
 }
 
-/// Print search progress
-pub fn print_progress(
-    prefix: Option<&str>,
-    suffix: Option<&str>,
-    difficulty: f64,
-    device_name: &str,
-) {
-    let pattern = match (prefix, suffix) {
-        (Some(p), Some(s)) => format!("{}...{}", p, s),
-        (Some(p), None) => format!("{}...", p),
-        (None, Some(s)) => format!("...{}", s),
-        (None, None) => "any".to_string(),
-    };
+/// File handler for saving results
+pub struct ResultFile {
+    path: PathBuf,
+}
 
-    println!();
-    println!("{}", "╔══════════════════════════════════════════════════════════════════╗".cyan());
-    println!("{}", "║         GPU-Accelerated Ethereum Vanity Address Generator        ║".cyan());
-    println!("{}", "╚══════════════════════════════════════════════════════════════════╝".cyan());
-    println!();
-    println!("  {} {}", "Pattern:".bold(), pattern.green());
-    println!("  {} {:.2e} (1 in {:.0})", "Difficulty:".bold(), difficulty, difficulty);
-    println!("  {} {}", "Device:".bold(), device_name);
-    println!();
+impl ResultFile {
+    pub fn new(prefix: Option<&str>, suffix: Option<&str>) -> io::Result<Self> {
+        let filename = match (prefix, suffix) {
+            (Some(p), Some(s)) => format!("{}_{}.txt", p, s),
+            (Some(p), None) => format!("{}.txt", p),
+            (None, Some(s)) => format!("{}.txt", s),
+            (None, None) => "results.txt".to_string(),
+        };
+
+        let path = PathBuf::from(&filename);
+
+        // Create/truncate file
+        let mut file = File::create(&path)?;
+        writeln!(file, "# Vanity Address Results")?;
+        writeln!(file, "# Pattern: {}",
+            match (prefix, suffix) {
+                (Some(p), Some(s)) => format!("{}...{}", p, s),
+                (Some(p), None) => format!("{}...", p),
+                (None, Some(s)) => format!("...{}", s),
+                (None, None) => "any".to_string(),
+            }
+        )?;
+        writeln!(file, "# Generated: {}", chrono_timestamp())?;
+        writeln!(file, "#")?;
+        writeln!(file)?;
+
+        Ok(Self { path })
+    }
+
+    pub fn save_result(&mut self, result: &SearchResult) -> io::Result<()> {
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&self.path)?;
+        write!(file, "{}", result.to_file_format())?;
+        Ok(())
+    }
+
+    pub fn path(&self) -> &PathBuf {
+        &self.path
+    }
 }
 
 /// Performance table for live display
@@ -90,7 +119,7 @@ impl PerformanceTable {
         Self {
             start_time: std::time::Instant::now(),
             last_update: std::time::Instant::now() - Duration::from_secs(1),
-            update_interval: Duration::from_millis(200), // Update every 200ms
+            update_interval: Duration::from_millis(100), // Update every 100ms for smoother display
         }
     }
 
@@ -104,6 +133,7 @@ impl PerformanceTable {
         &mut self,
         iterations: u64,
         matches: usize,
+        target: usize,
         pattern: &str,
         difficulty: f64,
     ) {
@@ -115,118 +145,135 @@ impl PerformanceTable {
             0.0
         };
 
-        // Clear previous lines and render new table
-        print!("{}", "\x1B[2J\x1B[1;1H"); // Clear screen and move cursor to top
+        // Move cursor to top and clear
+        print!("\x1B[H\x1B[2J");
 
         // Header
-        println!("{}", "╔══════════════════════════════════════════════════════════════════════════════╗".bright_cyan());
-        println!("{}", "║              🚀 ETHEREUM VANITY ADDRESS GENERATOR - LIVE SEARCH              ║".bright_cyan());
-        println!("{}", "╚══════════════════════════════════════════════════════════════════════════════╝".bright_cyan());
+        println!("{}", "╔══════════════════════════════════════════════════════════════════════════════════╗".bright_cyan());
+        println!("{}", "║             🚀 ETHEREUM VANITY ADDRESS GENERATOR - LIVE SEARCH                  ║".bright_cyan());
+        println!("{}", "╚══════════════════════════════════════════════════════════════════════════════════╝".bright_cyan());
         println!();
 
         // Pattern info
         println!("  {} {}", "🎯 Pattern:".bold(), pattern.green().bold());
         println!("  {} {:.2e} (1 in {:.0})", "📊 Difficulty:", difficulty, difficulty);
+        println!("  {} {} / {}", "🎯 Target:".bold(), matches.to_string().bright_green(), target.to_string().bright_white());
         println!();
 
         // Performance table
-        println!("{}", "┌─────────────────────────────────────────────────────────────────────────────┐".cyan());
-        println!("{}", "│                          📈 PERFORMANCE METRICS                              │".cyan());
-        println!("{}", "├─────────────────────────────────────────────────────────────────────────────┤".cyan());
+        println!("{}", "┌──────────────────────────────────────────────────────────────────────────────────┐".cyan());
+        println!("{}", "│                            📈 LIVE PERFORMANCE                                   │".cyan());
+        println!("{}", "├──────────────────────────────────────────────────────────────────────────────────┤".cyan());
 
-        // Row 1: Iterations and Speed
+        // Stats
         let iter_str = format_number(iterations);
         let speed_str = format_speed(rate);
+        let time_str = format_duration(elapsed);
+
         println!(
-            "│  {:<20} {:<25}  │",
-            format!("{}:", "Addresses Checked").dimmed(),
+            "│  {:<22} {:<52}│",
+            "Addresses Checked:",
             iter_str.bright_white().bold()
         );
         println!(
-            "│  {:<20} {:<25}  │",
-            format!("{}:", "Speed").dimmed(),
+            "│  {:<22} {:<52}│",
+            "Speed:",
             speed_str.green().bold()
         );
-
-        // Row 2: Time and Matches
-        let time_str = format_duration(elapsed);
         println!(
-            "│  {:<20} {:<25}  │",
-            format!("{}:", "Time Elapsed").dimmed(),
+            "│  {:<22} {:<52}│",
+            "Time Elapsed:",
             time_str.yellow().bold()
         );
         println!(
-            "│  {:<20} {:<25}  │",
-            format!("{}:", "Matches Found").dimmed(),
+            "│  {:<22} {:<52}│",
+            "Matches Found:",
             format!("{}", matches).bright_green().bold()
         );
 
-        // Row 3: ETA estimate
-        let remaining = difficulty as f64 - iterations as f64;
-        let eta_str = if rate > 0.0 && remaining > 0.0 {
-            let eta_secs = remaining / rate;
-            format_duration(eta_secs)
-        } else {
-            "Calculating...".to_string()
-        };
-        println!(
-            "│  {:<20} {:<25}  │",
-            format!("{}:", "Est. Time Remaining").dimmed(),
-            eta_str.bright_blue().bold()
-        );
-
-        println!("{}", "└─────────────────────────────────────────────────────────────────────────────┘".cyan());
-        println!();
-
-        // Progress bar
-        let progress = (iterations as f64 / difficulty.max(1.0)).min(1.0);
-        let bar_width = 60;
-        let filled = (progress * bar_width as f64) as usize;
+        // Progress bar for matches
+        let match_progress = (matches as f64 / target as f64).min(1.0);
+        let bar_width = 50;
+        let filled = (match_progress * bar_width as f64) as usize;
         let empty = bar_width - filled;
 
-        print!("  [");
+        print!("│  {:<22} ", "Progress:");
         print!("{}", "█".repeat(filled).green());
         print!("{}", "░".repeat(empty).dimmed());
-        println!("] {:.2}%", progress * 100.0);
+        println!(" {:5.1}% {:>8}│", match_progress * 100.0, format!("({}/{})", matches, target));
+
+        println!("{}", "└──────────────────────────────────────────────────────────────────────────────────┘".cyan());
         println!();
 
-        // Activity log
-        println!("{}", "┌─────────────────────────────────────────────────────────────────────────────┐".dimmed());
-        println!("{}", "│                              📝 ACTIVITY LOG                                 │".dimmed());
-        println!("{}", "├─────────────────────────────────────────────────────────────────────────────┤".dimmed());
+        // Live log area - show recent activity
+        println!("{}", "┌──────────────────────────────────────────────────────────────────────────────────┐".dimmed());
+        println!("{}", "│                              📝 LIVE ACTIVITY LOG                                │".dimmed());
+        println!("{}", "├──────────────────────────────────────────────────────────────────────────────────┤".dimmed());
+
+        // Current status
+        let timestamp = chrono_timestamp();
         println!(
-            "│  {} {}",
-            "⏱".dimmed(),
-            format!("[{}] Searching...", format_timestamp()).dimmed()
+            "│  {} [{}] {}",
+            "⏱".yellow(),
+            timestamp.dimmed(),
+            format!("Searching... ({} addresses/sec)", format_speed(rate)).white()
         );
-        println!(
-            "│  {} {}",
-            "⚡".dimmed(),
-            format!("Processing {:.0} keys/second", rate).dimmed()
-        );
+
         if matches > 0 {
             println!(
-                "│  {} {}",
-                "✅".green(),
-                format!("[{}] Found {} match(es) so far!", format_timestamp(), matches).green()
+                "│  {} [{}] Found {} match(es) - saved to file",
+                "✅".bright_green(),
+                timestamp.dimmed(),
+                matches.to_string().bright_green()
             );
         }
-        println!("{}", "└─────────────────────────────────────────────────────────────────────────────┘".dimmed());
+
+        println!(
+            "│  {} {}",
+            "📁".blue(),
+            format!("Results will be saved to output file").dimmed()
+        );
+
+        println!("{}", "└──────────────────────────────────────────────────────────────────────────────────┘".dimmed());
+
+        // Instructions
+        println!();
+        println!("  {} Press Ctrl+C to stop searching", "ℹ️".dimmed());
 
         // Flush output
         io::stdout().flush().ok();
     }
 
-    /// Log a message during search
-    pub fn log_message(&self, message: &str, msg_type: LogType) {
-        let timestamp = format_timestamp();
-        let prefix = match msg_type {
-            LogType::Info => "ℹ️ ".blue(),
-            LogType::Success => "✅ ".green(),
-            LogType::Warning => "⚠️ ".yellow(),
-            LogType::Match => "🎯 ".bright_green(),
-        };
-        eprintln!("{} [{}] {}", prefix, timestamp.dimmed(), message);
+    /// Print a match notification immediately
+    pub fn print_match_found(&self, result: &SearchResult, match_num: usize, total: usize) {
+        // Print above the current display
+        println!();
+        println!("{}", "╔══════════════════════════════════════════════════════════════════════════════════╗".bright_green());
+        println!(
+            "{}",
+            format!(
+                "║  🎉 MATCH #{}/{} FOUND at iteration {}",
+                match_num,
+                total,
+                format_number(result.iteration)
+            )
+            .bright_green()
+            .bold()
+        );
+        println!("{}", "╠══════════════════════════════════════════════════════════════════════════════════╣".bright_green());
+        println!(
+            "║  {}: {}",
+            "Address".cyan(),
+            result.keypair.address_hex().bright_white()
+        );
+        println!(
+            "║  {}: {}",
+            "Private".yellow(),
+            result.keypair.private_key_hex()
+        );
+        println!("{}", "╚══════════════════════════════════════════════════════════════════════════════════╝".bright_green());
+        println!();
+        io::stdout().flush().ok();
     }
 }
 
@@ -236,27 +283,29 @@ impl Default for PerformanceTable {
     }
 }
 
-/// Log message type
-pub enum LogType {
-    Info,
-    Success,
-    Warning,
-    Match,
-}
-
-/// Print statistics (final summary)
+/// Print final statistics
 pub struct Stats {
     pub addresses_checked: u64,
     pub elapsed_secs: f64,
     pub matches_found: usize,
+    pub target: usize,
+    pub output_file: String,
 }
 
 impl Stats {
-    pub fn new(addresses_checked: u64, elapsed_secs: f64, matches_found: usize) -> Self {
+    pub fn new(
+        addresses_checked: u64,
+        elapsed_secs: f64,
+        matches_found: usize,
+        target: usize,
+        output_file: &str,
+    ) -> Self {
         Self {
             addresses_checked,
             elapsed_secs,
             matches_found,
+            target,
+            output_file: output_file.to_string(),
         }
     }
 
@@ -273,30 +322,35 @@ impl Stats {
         let rate_str = format_speed(rate);
 
         println!();
-        println!("{}", "╔══════════════════════════════════════════════════════════════════════════════╗".cyan());
-        println!("{}", "║                           📊 FINAL STATISTICS                                 ║".cyan());
-        println!("{}", "╠══════════════════════════════════════════════════════════════════════════════╣".cyan());
+        println!("{}", "╔══════════════════════════════════════════════════════════════════════════════════╗".cyan());
+        println!("{}", "║                            📊 FINAL STATISTICS                                   ║".cyan());
+        println!("{}", "╠══════════════════════════════════════════════════════════════════════════════════╣".cyan());
         println!(
-            "│  {:<25} {:>45}  │",
+            "│  {:<25} {:>48}  │",
             "Total Addresses:".dimmed(),
             format_number(self.addresses_checked).bright_white().bold()
         );
         println!(
-            "│  {:<25} {:>45}  │",
+            "│  {:<25} {:>48}  │",
             "Time Elapsed:".dimmed(),
             format_duration(self.elapsed_secs).yellow().bold()
         );
         println!(
-            "│  {:<25} {:>45}  │",
+            "│  {:<25} {:>48}  │",
             "Average Speed:".dimmed(),
             rate_str.green().bold()
         );
         println!(
-            "│  {:<25} {:>45}  │",
+            "│  {:<25} {:>48}  │",
             "Matches Found:".dimmed(),
-            format!("{}", self.matches_found).bright_green().bold()
+            format!("{}/{}", self.matches_found, self.target).bright_green().bold()
         );
-        println!("{}", "╚══════════════════════════════════════════════════════════════════════════════╝".cyan());
+        println!(
+            "│  {:<25} {:>48}  │",
+            "Output File:".dimmed(),
+            self.output_file.bright_blue().bold()
+        );
+        println!("{}", "╚══════════════════════════════════════════════════════════════════════════════════╝".cyan());
         println!();
     }
 }
@@ -320,8 +374,10 @@ pub fn format_speed(rate: f64) -> String {
         format!("{:.2} M/s", rate / 1_000_000.0)
     } else if rate >= 1_000.0 {
         format!("{:.2} K/s", rate / 1_000.0)
-    } else {
+    } else if rate >= 1.0 {
         format!("{:.0} /s", rate)
+    } else {
+        format!("{:.1} /s", rate)
     }
 }
 
@@ -345,9 +401,10 @@ pub fn format_duration(secs: f64) -> String {
 }
 
 /// Format current timestamp
-fn format_timestamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+pub fn chrono_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     let secs = now.as_secs() % 86400;
     let hours = secs / 3600;
@@ -366,12 +423,6 @@ mod tests {
         assert_eq!(format_number(100), "100");
         assert_eq!(format_number(1000), "1,000");
         assert_eq!(format_number(1000000), "1,000,000");
-    }
-
-    #[test]
-    fn test_stats_addresses_per_sec() {
-        let stats = Stats::new(1_000_000, 1.0, 1);
-        assert_eq!(stats.addresses_per_sec(), 1_000_000.0);
     }
 
     #[test]

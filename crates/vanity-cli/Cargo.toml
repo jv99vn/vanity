@@ -17,6 +17,7 @@ indicatif.workspace = true
 colored.workspace = true
 anyhow.workspace = true
 hex.workspace = true
+ctrlc = "3.4"
 
 [features]
 default = []
