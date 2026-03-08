@@ -11,6 +11,7 @@ path = "src/main.rs"
 vanity-core = { path = "../vanity-core" }
 vanity-cuda = { path = "../vanity-cuda", optional = true }
 vanity-opencl = { path = "../vanity-opencl", optional = true }
+vanity-metal = { path = "../vanity-metal", optional = true }
 
 clap.workspace = true
 indicatif.workspace = true
@@ -20,6 +21,7 @@ hex.workspace = true
 ctrlc = "3.4"
 
 [features]
-default = []
+default = ["metal"]
 cuda = ["dep:vanity-cuda"]
 opencl = ["dep:vanity-opencl"]
+metal = ["dep:vanity-metal"]

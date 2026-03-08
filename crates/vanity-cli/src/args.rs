@@ -9,7 +9,7 @@ use clap::Parser;
     version,
     about = "GPU-accelerated Ethereum vanity address generator",
     long_about = "Generate Ethereum addresses with custom prefix and/or suffix.
-Uses GPU acceleration (CUDA/OpenCL) for maximum performance.
+Uses GPU acceleration for maximum performance.
 
 Examples:
   vanity --prefix dead                  # Address starting with 'dead'
@@ -17,7 +17,8 @@ Examples:
   vanity --prefix cafe --suffix face    # Both prefix and suffix
   vanity --prefix dead --count 5        # Find 5 matching addresses
   vanity --prefix dead --device 0       # Use specific GPU
-  vanity --prefix dead --backend opencl # Use OpenCL instead of CUDA"
+  vanity --prefix dead --backend metal  # Use Metal (Apple Silicon)
+  vanity --prefix dead --backend cpu    # Use CPU only"
 )]
 pub struct Args {
     /// Hex prefix for the address (e.g., "dead")
@@ -29,20 +30,16 @@ pub struct Args {
     pub suffix: Option<String>,
 
     /// Number of addresses to find
-    #[arg(short = 'n', long, default_value = "1")]
+    #[arg(short = 'n', long, default_value = "1", alias = "count")]
     pub count: usize,
 
     /// GPU device index to use
     #[arg(short, long, default_value = "0")]
     pub device: usize,
 
-    /// Backend to use: cuda, opencl, or cpu
-    #[arg(short, long, default_value = "cuda", value_parser = ["cuda", "opencl", "cpu"])]
+    /// Backend to use: metal (Apple Silicon), cuda (NVIDIA), opencl, or cpu
+    #[arg(short, long, default_value = "metal", value_parser = ["metal", "cuda", "opencl", "cpu"])]
     pub backend: String,
-
-    /// Maximum iterations before stopping (0 = unlimited)
-    #[arg(long, default_value = "0")]
-    pub max_iterations: u64,
 
     /// Show performance statistics
     #[arg(long)]

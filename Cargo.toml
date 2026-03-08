@@ -5,6 +5,7 @@ members = [
     "crates/vanity-core",
     "crates/vanity-cuda",
     "crates/vanity-opencl",
+    "crates/vanity-metal",
 ]
 
 [workspace.package]

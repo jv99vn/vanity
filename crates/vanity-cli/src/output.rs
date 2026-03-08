@@ -1,6 +1,5 @@
 //! Output formatting and display utilities.
 
-use colored::Colorize;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -65,7 +64,7 @@ impl ResultFile {
         Ok(Self { path })
     }
 
-    pub fn save_result(&mut self, result: &SearchResult) -> io::Result<()> {
+    pub fn save_result(&self, result: &SearchResult) -> io::Result<()> {
         let mut file = OpenOptions::new()
             .append(true)
             .open(&self.path)?;
@@ -124,7 +123,7 @@ pub fn format_duration(secs: f64) -> String {
     }
 }
 
-/// Format current timestamp
+/// Format current timestamp (HH:MM:SS)
 pub fn chrono_timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
