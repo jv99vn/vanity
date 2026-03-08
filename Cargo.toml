@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vanity-cli",
+    "crates/vanity-core",
+    "crates/vanity-cuda",
+    "crates/vanity-opencl",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["JV"]
+repository = "https://github.com/jv/vanity"
+
+[workspace.dependencies]
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+indicatif = "0.17"
+colored = "2.1"
+
+# GPU
+cudarc = "0.10"
+opencl3 = "0.9"
+
+# Crypto
+sha3 = "0.10"
+secp256k1 = "0.27"
+k256 = { version = "0.13", features = ["ecdsa"] }
+
+# Utils
+anyhow = "1.0"
+thiserror = "1.0"
+hex = "0.4"
+rand = "0.8"

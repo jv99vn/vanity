@@ -1,0 +1,18 @@
+[package]
+name = "vanity-opencl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vanity-core = { path = "../vanity-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+
+[features]
+default = []
+opencl-runtime = ["dep:opencl3"]
+
+[dependencies.opencl3]
+workspace = true
+optional = true

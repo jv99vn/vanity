@@ -1,0 +1,21 @@
+[package]
+name = "vanity-cuda"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vanity-core = { path = "../vanity-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+hex.workspace = true
+
+[build-dependencies]
+anyhow.workspace = true
+
+[features]
+default = []
+cuda-runtime = ["dep:cudarc"]
+
+[dependencies.cudarc]
+workspace = true
+optional = true

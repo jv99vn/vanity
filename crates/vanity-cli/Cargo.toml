@@ -1,0 +1,24 @@
+[package]
+name = "vanity-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "vanity"
+path = "src/main.rs"
+
+[dependencies]
+vanity-core = { path = "../vanity-core" }
+vanity-cuda = { path = "../vanity-cuda", optional = true }
+vanity-opencl = { path = "../vanity-opencl", optional = true }
+
+clap.workspace = true
+indicatif.workspace = true
+colored.workspace = true
+anyhow.workspace = true
+hex.workspace = true
+
+[features]
+default = []
+cuda = ["dep:vanity-cuda"]
+opencl = ["dep:vanity-opencl"]
